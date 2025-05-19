@@ -14,7 +14,7 @@ params = data['params']
 C = np.asarray(params['C'])
 W = np.asarray(data['W'])
 hbar = np.asarray(data['hbar'])
-phi = lambda x: x 
+phi = lambda x: jax.nn.relu(x)
 
 def continuous_network_dynamics(x, inputs):
     tau = 150
@@ -25,7 +25,7 @@ def discrete_network_dynamics(x, inputs):
     dt = 1.0
     y, h = x[:2], x[2:]
     h = h + dt*continuous_network_dynamics(h, inputs)
-    y = h.dot(C)
+    y = phi(h).dot(C)
     x_new = np.concatenate((y, h))
     return x_new, x_new
 
@@ -54,4 +54,4 @@ def rollout(x0, u_trj):
     return y, h, q
 
 rollout_jit = jit(rollout)
-rollout_batch = jit(vmap(rollout), (0,0))
+rollout_batch = jit(vmap(rollout, in_axes=(0, 0)))
