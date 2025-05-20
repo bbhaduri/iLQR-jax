@@ -15,6 +15,7 @@ C = np.asarray(params['C'])
 W = np.asarray(data['W'])
 hbar = np.asarray(data['hbar'])
 phi = lambda x: jax.nn.relu(x)
+# phi = lambda x: x
 
 def continuous_network_dynamics(x, inputs):
     tau = 150
