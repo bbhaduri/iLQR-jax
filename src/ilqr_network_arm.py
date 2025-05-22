@@ -11,9 +11,52 @@ import time
 import network_and_arm
 import arm_model
 
+# Global Variable(s)
+#TODO: Would be helpful if these could be defined in notebook
+# Delay period from Schimel et al. 2024
+DELAY = 300 #ms
+# Move period from Schimel et al. 2024
+T = 900
+
+def init_radial_task(start_pos=np.array([0.0, 0.4]), radius=0.12):
+    """
+    Initialize the arm model in a radial task. Targets are placed in a circle
+    around the starting position of the hand.
+    Args:
+        start_pos (np.ndarray): Starting position of the hand [x, y]
+        radius (float): Radius of the radial task
+    Returns:
+        init_thetas (np.ndarray): Initial joint angles [theta1, theta2]
+        target_angles (np.ndarray): Target joint angles [theta1, theta2]
+        targets (np.ndarray): Target positions [x, y]
+    """
+    # Set starting positions
+    x0, y0 = start_pos
+
+    # Get target locations
+    target_angles = (2*np.pi/360)* np.array(
+        [0., 45., 90., 135., 180., 225., 270., 315.]
+    )
+    target_x = x0 + (np.cos(target_angles)*radius)
+    target_y = y0 + (np.sin(target_angles)*radius)
+    targets = np.concat([target_x[:, None], target_y[:, None]], axis=1) #m
+
+    # Get initial angles from starting position
+    theta1, theta2 = arm_model.get_angles(start_pos)
+    init_thetas = np.vstack([theta1, theta2]).squeeze()
+
+    # Store arm angles for targets
+    target_t1, target_t2 = jax.vmap(arm_model.get_angles)(targets)
+    target_angles = np.hstack([target_t1[:, None], target_t2[:, None]])
+    
+    return init_thetas, target_angles, targets
+
+# NOTE: if changing start pos in notebook, START_ANGLE will be wrong
+_, START_ANGLE, _ = init_radial_task()
 
 # Cost functions
-def cost_stage(x, u, target, lmbda):
+# NOTE: Cost from SCHIMEL et al.
+def cost_stage(x, u, t, target, lmbda):
     """
     \|state - target\|^2 + lmbda \|u\|^2
     x: (n_states,) angles 
@@ -21,9 +64,23 @@ def cost_stage(x, u, target, lmbda):
     target: (n_states, ) -- To Do
     lmbda: float > 0, penalty on cost
     """
-    state_cost = np.sum((x[-4:-2] - target)**2)
-    control_cost = np.sum(u**2)
-    return state_cost + lmbda * control_cost
+    ALPHA_NULL, ALPHA_EFFORT = lmbda
+    # Create weights to mimic integral bounds while keeping differentiability
+    move_weight = (jax.nn.relu(t-DELAY)**2/T**2)
+    prep_weight = ALPHA_NULL * (jax.nn.relu(DELAY-t)**2/DELAY**2)
+    
+    # Cost during movement phase (weighted by move_weight)
+    movement_cost = move_weight * np.sum((x[-4:-2] - target)**2)
+    
+    # Cost during preparation phase (weighted by prep_weight)
+    # Interesting, prep_weight > 0.01 causes NaNs (only checked log factor)
+    prep_cost = prep_weight * (np.sum((x[-4:-2] - START_ANGLE)**2) + 
+                               np.sum(x[-2:]**2) + np.sum(x[:2]**2))
+    
+    # Control cost remains the same
+    control_cost = ALPHA_EFFORT * np.sum(u**2)
+    
+    return movement_cost + prep_cost + control_cost
 
 def cost_final(x, target):
     """
@@ -32,15 +89,16 @@ def cost_final(x, target):
     return np.sum((x[-4:-2] - target)**2)
 
 # Computes cost over trajectory of ln. (time steps, n_states)
-cost_stage_trj = vmap(cost_stage, in_axes=(0,0,0,None))
+cost_stage_trj = vmap(cost_stage, in_axes=(0,0,0,0,None))
 # Cost of multiple trajectories: (batch size, time steps, n_states)
-cost_stage_batch = vmap(cost_stage_trj, in_axes=(0,0,0,None))
+cost_stage_batch = vmap(cost_stage_trj, in_axes=(0,0,0,0,None))
 
 def cost_trj(x_trj, u_trj, target_trj, lmbda):
     """
     \sum_t \|state - target\|^2 + lmbda \|u\|^2
     """
-    c_stage = cost_stage_trj(x_trj[:-1], u_trj[:-1], target_trj[:-1], lmbda) 
+    t = np.arange(x_trj.shape[0]-1)
+    c_stage = cost_stage_trj(x_trj[:-1], u_trj[:-1], t, target_trj[:-1], lmbda) 
     c_final = cost_final(x_trj[-1], target_trj[-1])
     return c_stage + c_final
 
@@ -48,7 +106,7 @@ cost_trj_batch = vmap(cost_trj, (0,0,0,None))
 
 
 #  Gradients
-def cost_stage_grads(x, u, target, lmbda):
+def cost_stage_grads(x, u, t, target, lmbda):
     """
     x: (n_states, )
     u: (n_controls,)
@@ -59,15 +117,15 @@ def cost_stage_grads(x, u, target, lmbda):
     dL = jacrev(cost_stage, (0,1)) #l_x, l_u
     d2L = jacfwd(dL, (0,1)) # l_xx etc
     
-    l_x, l_u = dL(x, u, target, lmbda)
-    d2Ldx, d2Ldu = d2L(x, u, target, lmbda)
+    l_x, l_u = dL(x, u, t, target, lmbda)
+    d2Ldx, d2Ldu = d2L(x, u, t, target, lmbda)
     l_xx, l_xu = d2Ldx
     l_ux, l_uu = d2Ldu
     
     return l_x, l_u, l_xx, l_ux, l_uu
 
 # Accepts (batch size, n_states) etc.
-cost_stage_grads_batch = vmap(cost_stage_grads, in_axes=(0,0,0,None)) 
+cost_stage_grads_batch = vmap(cost_stage_grads, in_axes=(0,0,0,0,None))
 
 def cost_final_grads(x, target):
     """
@@ -157,7 +215,7 @@ def forward_pass_scan(x_trj, u_trj, k_trj, K_trj):
     """
     inputs = (x_trj, u_trj, k_trj, K_trj)
     init = np.concatenate((np.zeros_like(u_trj[0]), x_trj[0]))
-    states  = scan(discrete_dynamics_affine, init, (x_trj, u_trj, k_trj, K_trj))[1]
+    states  = scan(discrete_dynamics_affine, init, inputs)[1]
     u_trj_new, x_trj_new = states[:,:200], states[:-1,200:]
     #print(x_trj[0].shape, x_trj_new.shape)
     x_trj_new = np.concatenate((x_trj[0][None], x_trj_new), axis=0)
@@ -172,9 +230,9 @@ def step_back_scan(state, inputs, regu, lmbda):
     """
     One step of Bellman iteration, backward in time
     """
-    x_t, u_t, target_t = inputs
+    x_t, u_t, t, target_t = inputs
     k, K, V_x, V_xx = state
-    l_x, l_u, l_xx, l_ux, l_uu = cost_stage_grads(x_t, u_t, target_t, lmbda)
+    l_x, l_u, l_xx, l_ux, l_uu = cost_stage_grads(x_t, u_t, t, target_t, lmbda)
     f_x, f_u = dynamics_grads(x_t, u_t)
     Q_x, Q_u, Q_xx, Q_ux, Q_uu = Q_terms(l_x, l_u, l_xx, l_ux, l_uu, f_x, f_u, V_x, V_xx)
     Q_uu_regu = Q_uu + np.eye(Q_uu.shape[0])*regu
@@ -194,7 +252,8 @@ def backward_pass_scan(x_trj, u_trj, target_trj, regu, lmbda):
     V_xx = l_final_xx
     # Wrap initial state and inputs for use in scan
     init = (k, K, V_x, V_xx)
-    xs = (x_trj, u_trj, target_trj)
+    ts = np.arange(x_trj.shape[0])
+    xs = (x_trj, u_trj, ts, target_trj)
     # Loop --- backward in time
     step_fn = lambda state, inputs: step_back_scan(state, inputs, regu, lmbda)
     _, state = scan(step_fn, init, xs, reverse=True)
@@ -217,6 +276,8 @@ def run_ilqr(x0, target_trj, u_trj = None, max_iter=10, regu_init=10, lmbda=1e-1
     regu = regu_init
     
     cost_trace = [total_cost]
+    x_trace = [x_trj]
+    u_trace = [u_trj]
     
     # Run main loop
     for it in range(max_iter):
@@ -225,17 +286,27 @@ def run_ilqr(x0, target_trj, u_trj = None, max_iter=10, regu_init=10, lmbda=1e-1
         u_trj_new, x_trj_new = forward_pass_jit(x_trj, u_trj, k_trj, K_trj)
         # Evaluate new trajectory
         total_cost = cost_trj(x_trj_new, u_trj_new, target_trj, lmbda).sum()
-        t1 = time.time()
         
         cost_redu = cost_trace[-1] - total_cost
         cost_trace.append(total_cost)
         # Still need to update, start from current guess
         x_trj = x_trj_new
         u_trj = u_trj_new
+
+        # Add to trace
+        x_trace.append(x_trj)
+        u_trace.append(u_trj)
         
-        #if it%1 == 0:
-        #    print(it, total_cost, cost_redu)
-    return x_trj_new, u_trj_new, np.array(cost_trace)
+        # if it%1 == 0:
+        #    print(f"Iteration {it}: Cost: {total_cost}, Reduction: {cost_redu}")
+    
+    # Get index of lowest cost
+    min_cost_idx = np.hstack(cost_trace).argmin()
+    # Get best trajectoies
+    best_x_trj = np.array(x_trace)[min_cost_idx]
+    best_u_trj = np.array(u_trace)[min_cost_idx]
+    
+    return best_x_trj, best_u_trj, np.array(cost_trace)
 
 # To do: use scan and jit?. At least vmap the backward passes etc.
 run_ilqr_batch = vmap(run_ilqr, (0, 0, 0, None, None, None))

@@ -1,4 +1,7 @@
 import jax
+import jax.random as jr
+import numpy as onp
+
 from jax import numpy as np
 from jax.lax import scan
 from jax import vmap, jit
@@ -7,24 +10,32 @@ import pickle
 
 import arm_model
 
-# Network dynamics
-with open("../data/network_s972356.pickle", 'rb') as handle:
-    data = pickle.load(handle)
-params = data['params']
-C = np.asarray(params['C'])
-W = np.asarray(data['W'])
-hbar = np.asarray(data['hbar'])
+# OLD Network dynamics
+# with open("../data/network_s972356.pickle", 'rb') as handle:
+#     data = pickle.load(handle)
+# params = data['params']
+# C = np.asarray(params['C'])
+# W = np.asarray(data['W'])
+# hbar = np.asarray(data['hbar'])
+
+# Parameters from Schimel et al.
+W = np.asarray(onp.fromfile("../data/w", sep=' ')).reshape(200, 200)
+C = np.asarray(onp.fromfile("../data/c", sep=' ')).reshape(2, 200).T
+hbar = 20. + 5. * jr.normal(jr.PRNGKey(0), (200,))
+
+# Activation function
 phi = lambda x: jax.nn.relu(x)
-# phi = lambda x: x
+# step size
+dt = .001
+# Network time constant
+tau = .150
 
 def continuous_network_dynamics(x, inputs):
-    tau = 150
     return (-x + W.dot(phi(x)) + inputs + hbar) / tau
 
 def discrete_network_dynamics(x, inputs):
     # x: (neurons + 2, ), first two dims are readouts
-    dt = 1.0
-    y, h = x[:2], x[2:]
+    h = x[2:]
     h = h + dt*continuous_network_dynamics(h, inputs)
     y = phi(h).dot(C)
     x_new = np.concatenate((y, h))

@@ -24,6 +24,9 @@ a3 = I2
 theta0 = np.array([10, 143.54]) * np.pi/180
 x0 = np.concatenate((theta0, np.zeros((2, ))))
 
+# step size
+dt = .01
+
 def get_M(theta):
     c = np.cos(theta[1])
     return N * np.array([[a1 + 2*a2*c, a3 + a2*c], 
@@ -52,23 +55,62 @@ def discrete_dynamics(x, m):
     x[t+1] = f(x[t], m[t])
     Fw Euler approximation of continuous dynamics
     """
-    dt = .01
     xnew = x + dt*continuous_dynamics(x, m)
     return xnew, xnew
 
-def get_position(x):
+def get_angles(pos):
+    """
+    Calculate the angles of the arm segments given the hand position.
+    Args:
+        pos (jnp.ndarray): Hand position [x, y]
+    Returns:
+        jnp.ndarray: Joint angles [theta1, theta2]
+    """
+    x, y = pos
+    theta1 = np.arctan2(y, x) - np.arccos((x**2 + y**2 + L1**2 - L2**2)
+                                                     /(2*L1*(x**2 + y**2)**0.5))
+    theta2 = np.arccos((x**2 + y**2 - L1**2 - L2**2)/(2*L1*L2))
+
+    return theta1, theta2
+
+# Define function for calculating arm positions
+def get_arm_pos(thetas):
+    """
+    Calculate the positions of the both arm segments given the joint angles.
+    Args:
+        thetas (jnp.ndarray): Joint angles [theta1, theta2]
+    Returns:
+        jnp.ndarray: Positions of the hand and elbow
+    """
+    # Calculate positions and return
+    elbow_pos = L1 * np.array([
+        (np.cos(thetas[0])), (np.sin(thetas[0]))
+    ])
+
+    hand_pos = np.array(
+        [(elbow_pos[0] + L2*np.cos(thetas.sum())),
+         (elbow_pos[1] + L2*np.sin(thetas.sum()))]
+    )
+
+    return np.vstack([hand_pos, elbow_pos])
+
+def get_position(x, full_arm=False):
     """
     Compute hand position from state
     """
     theta = x[:2]
-    y1 = L1 * np.array([np.cos(theta[0]), np.sin(theta[0])])
-    y2 = L2 * np.array([np.cos(theta.sum()), np.sin(theta.sum())])
-    return y1 + y2
+    if full_arm:
+        return get_arm_pos(theta)
+    else:
+        y1 = L1 * np.array([np.cos(theta[0]), np.sin(theta[0])])
+        y2 = L2 * np.array([np.cos(theta.sum()), np.sin(theta.sum())])
+
+        return y1 + y2
 
 # Get position over entire trajectory (time steps, 4)
-get_position_trj = vmap(get_position, in_axes=0)
+get_position_trj = vmap(get_position, in_axes=(0, None))
 # Position over multiple trials (batch size, time steps, 4)
-get_position_batch  = vmap(get_position_trj)
+get_position_batch  = vmap(get_position_trj, in_axes=(0, None))
 
 def rollout(x0, m_trj):
     """
