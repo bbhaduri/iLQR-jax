@@ -5,8 +5,7 @@ import numpy as onp
 from jax import numpy as np
 from jax.lax import scan
 from jax import vmap, jit
-
-import pickle
+from utils import keygen
 
 import arm_model
 
@@ -21,7 +20,7 @@ import arm_model
 # Parameters from Schimel et al.
 W = np.asarray(onp.fromfile("../data/w", sep=' ')).reshape(200, 200)
 C = np.asarray(onp.fromfile("../data/c", sep=' ')).reshape(2, 200).T
-hbar = 20. + 5. * jr.normal(jr.PRNGKey(0), (200,))
+hbar = 20. + 5. * jr.normal(jr.key(0), (200,))
 
 # Activation function
 phi = lambda x: jax.nn.relu(x)
@@ -46,7 +45,7 @@ def discrete_network_dynamics(x, inputs):
 def discrete_dynamics(x, inputs):
     """
     x: [y, h, q] of size 2+N+4 = N+6
-    inputs: size (N, )
+    inputs: size (N,)
     """
     N = inputs.shape[0]
     network_states = discrete_network_dynamics(x[:N+2], inputs)[0]
@@ -55,15 +54,20 @@ def discrete_dynamics(x, inputs):
     x_new = np.concatenate((network_states, arm_states))
     return x_new, x_new 
 
-def rollout(x0, u_trj):
+def rollout(x0, u_trj, noise_key=None):
     """
     x0: init states [y0, h0, q0], size (N+6, )
     u_trj: network inputs, size (N, )
     """
     N = u_trj.shape[1]
+    # Add noise to the inputs if provided
+    if noise_key is not None:
+        noise = jr.normal(jr.key(noise_key), u_trj.shape) * 2. 
+        u_trj += noise
+    
     _, x_trj = scan(discrete_dynamics, x0, u_trj)
     y, h, q = x_trj[:,:2], x_trj[:,2:N+2], x_trj[:,N+2:]
     return y, h, q
 
 rollout_jit = jit(rollout)
-rollout_batch = jit(vmap(rollout, in_axes=(0, 0)))
+rollout_batch = vmap(rollout, in_axes=(0,0,0))

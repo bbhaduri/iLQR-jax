@@ -1,4 +1,5 @@
 import jax
+import jax.random as jr
 from jax import numpy as np
 from jax.lax import scan
 from jax import vmap, jit
@@ -153,7 +154,7 @@ def dynamics_grads(x, u):
     f_x, f_u = jacfwd(f, (0,1))(x,u)
     return f_x, f_u
   
-dynamics_grads_batch = vmap(dynamics_grads, (None,0,0))
+# dynamics_grads_batch = vmap(dynamics_grads, (None,0,0))
 
 
 ### Helpers for LQR approximation ### 
@@ -223,7 +224,7 @@ def forward_pass_scan(x_trj, u_trj, k_trj, K_trj):
 
 forward_pass_jit = jit(forward_pass_scan)
 # Batch over x, u, and feedback
-forward_pass_batch = jit(vmap(forward_pass_scan, (0,0,0,0))) 
+# forward_pass_batch = jit(vmap(forward_pass_scan, (0,0,0,0))) 
 
 # Backward pass
 def step_back_scan(state, inputs, regu, lmbda):
@@ -262,15 +263,25 @@ def backward_pass_scan(x_trj, u_trj, target_trj, regu, lmbda):
 
 backward_pass_jit = jit(backward_pass_scan)
 
-
-def run_ilqr(x0, target_trj, u_trj = None, max_iter=10, regu_init=10, lmbda=1e-1):
+#TODO: Add Optional Noise Key here to create randomness in dynamics
+def run_ilqr(
+        x0, 
+        target_trj, 
+        u_trj = None, 
+        noise_key = None, 
+        max_iter=10, 
+        regu_init=10, 
+        lmbda=(1e-1, 1e-1)):
+    """
+    """
     # Main loop
     # First forward rollout
     if u_trj is None:
         N = target_trj.shape[0]
         n_u = 200
         u_trj = onp.random.normal(size=(N, n_u)) * 0.0001
-    y_trj, h_trj, q_trj  = network_and_arm.rollout(x0, u_trj)
+    
+    y_trj, h_trj, q_trj = network_and_arm.rollout(x0, u_trj, None)
     x_trj = np.concatenate((y_trj, h_trj, q_trj),1)
     total_cost = cost_trj(x_trj, u_trj, target_trj, lmbda).sum()
     regu = regu_init
@@ -281,6 +292,11 @@ def run_ilqr(x0, target_trj, u_trj = None, max_iter=10, regu_init=10, lmbda=1e-1
     
     # Run main loop
     for it in range(max_iter):
+        # Create noise keys if specified
+        if noise_key is not None:
+            noise = jr.normal(jr.key(noise_key+it), u_trj.shape) * 2.
+            u_trj += noise
+        
         # Backward and forward pass
         k_trj, K_trj = backward_pass_jit(x_trj, u_trj, target_trj, regu, lmbda)
         u_trj_new, x_trj_new = forward_pass_jit(x_trj, u_trj, k_trj, K_trj)
@@ -309,4 +325,4 @@ def run_ilqr(x0, target_trj, u_trj = None, max_iter=10, regu_init=10, lmbda=1e-1
     return best_x_trj, best_u_trj, np.array(cost_trace)
 
 # To do: use scan and jit?. At least vmap the backward passes etc.
-run_ilqr_batch = vmap(run_ilqr, (0, 0, 0, None, None, None))
+run_ilqr_batch = vmap(run_ilqr, (0, 0, 0, 0, None, None, None))
